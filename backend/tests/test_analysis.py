@@ -383,3 +383,22 @@ def test_agent_uses_custom_category_for_grouped_summary():
     assert "Mumbai" in result["answer"]
     assert "25" in result["answer"]
     assert "20" in result["answer"]
+
+
+def test_agent_asks_for_clarification_when_grouping_is_ambiguous():
+    df = pd.DataFrame({
+        "Branch": ["Pune", "Mumbai", "Pune"],
+        "Department": ["Sales", "IT", "IT"],
+        "Sales": [100, 200, 300],
+    })
+    dataset_id = register_dataset(df)
+
+    result = run_analysis_agent(
+        dataset_id,
+        "Show total Sales by category",
+    )
+
+    answer = result["answer"]
+    assert "Which column should I group by?" in answer
+    assert "Branch" in answer
+    assert "Department" in answer

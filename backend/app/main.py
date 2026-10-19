@@ -1,4 +1,4 @@
-import io
+﻿import io
 
 import json
 
@@ -1184,9 +1184,19 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
         normalized_question = f" {q} "
         for raw_value in df[category_candidate].dropna().unique():
             value_text = str(raw_value).strip()
+
             normalized_value = normalize(value_text)
             if not normalized_value:
                 continue
+
+            # Do not mistake the requested numeric metric for a
+            # categorical value when its name also appears in the data.
+            if (
+                metric_column is not None
+                and normalized_value == normalize(str(metric_column))
+            ):
+                continue
+
             if re.search(r"\b" + re.escape(normalized_value) + r"\b", normalized_question):
                 if selected_category_value is None or len(normalized_value) > len(normalize(selected_category_value)):
                     selected_category_value = value_text
@@ -1876,9 +1886,29 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
         # Preserve the normal agent flow if a dataset has unusual column types.
         print(f"Deterministic filtered analysis skipped: {type(exc).__name__}: {exc}")
 
+
+    # Ask for clarification when a grouping question does not identify
+    # a category and multiple categorical columns are available.
+    ambiguous_grouping = (
+        asks_grouping
+        and selected_category is None
+        and selected_category_value_column is None
+        and not full_analysis
+        and len(categorical_columns) > 1
+        and not missing_requested_fields
+    )
+
+    if ambiguous_grouping:
+        available_categories = ", ".join(
+            f"`{column}`" for column in categorical_columns
+        )
+        answer = (
+            "Which column should I group by? "
+            f"Available categorical columns: {available_categories}.\n\n"
+            "For example, ask me to group Sales by `Branch` "
+            "or by `Department`."
+        )
     # Missing-value answers are also deterministic.
-
-
 
     if answer is None:
 
