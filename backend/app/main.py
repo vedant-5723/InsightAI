@@ -60,8 +60,10 @@ MAX_ROWS = 100_000
 
 MAX_COLUMNS = 200
 
-# Prototype storage. Data is lost when the backend restarts.
+# Keep prototype memory usage bounded. Oldest datasets are evicted first.
+MAX_STORED_DATASETS = 5
 
+# In-memory storage; data is lost when the backend restarts.
 datasets: dict[str, dict[str, Any]] = {}
 
 # ==========================================
@@ -358,7 +360,8 @@ async def upload_dataset(file: UploadFile = File(...)):
 
             detail=(
 
-                f"Could not read file: {type(exc).__name__}: {exc}"
+                "Could not read this file. Check that it is a valid, "
+                "supported CSV or Excel file and try again."
 
             ),
 
@@ -418,6 +421,12 @@ async def upload_dataset(file: UploadFile = File(...)):
 
     dataset_id = str(uuid.uuid4())
 
+    # Python dictionaries preserve insertion order, so evict the oldest
+    # uploaded dataset before storing another one at the configured limit.
+    while len(datasets) >= MAX_STORED_DATASETS:
+        oldest_dataset_id = next(iter(datasets))
+        datasets.pop(oldest_dataset_id, None)
+
     datasets[dataset_id] = {
 
         "filename": filename,
@@ -439,6 +448,24 @@ async def upload_dataset(file: UploadFile = File(...)):
         "columns": [str(column) for column in df.columns],
 
     }
+
+# ==========================================
+
+# DATASET LIFECYCLE
+
+# ==========================================
+
+@app.delete("/api/datasets/{dataset_id}")
+def delete_dataset(dataset_id: str):
+    """Release a dataset from in-memory storage when the client is done."""
+    if dataset_id not in datasets:
+        raise HTTPException(
+            status_code=404,
+            detail="Dataset not found. It may already have been removed.",
+        )
+
+    datasets.pop(dataset_id, None)
+    return {"deleted": True, "datasetId": dataset_id}
 
 # ==========================================
 
