@@ -104,7 +104,7 @@ def generate_text(provider: str, messages: list[dict[str, str]], api_key: str | 
         if json_mode:
             config["response_mime_type"] = "application/json"
         response = client.models.generate_content(
-            model=(model or "gemini-3.8-flash"),
+            model=(model or "gemini-2.5-flash"),
             contents=prompt,
             config=config,
         )
@@ -250,7 +250,7 @@ def chat(request: ChatRequest):
             api_key=request.apiKey,
             model=request.model,
         )
-        return {"reply": reply, "model": request.model or ("gemini-3.8-flash" if request.provider == "gemini" else MODEL), "provider": request.provider}
+        return {"reply": reply, "model": request.model or ("gemini-2.5-flash" if request.provider == "gemini" else MODEL), "provider": request.provider}
 
     except Exception as exc:
 
@@ -1396,8 +1396,10 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
 
         category_columns = categorical_columns[:5]
 
-    elif asks_grouping and categorical_columns:
+    elif asks_grouping and len(categorical_columns) == 1:
 
+        # A sole categorical column is an unambiguous default. If several
+        # categorical columns exist, leave grouping unresolved and ask the user.
         category_columns = categorical_columns[:1]
 
 
@@ -1489,6 +1491,7 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
         "customer": {"customer", "customers", "client", "clients"},
         "profit": {"profit", "profits"},
         "revenue": {"revenue", "sales", "turnover"},
+        "branch": {"branch", "branches"},
     }
     question_terms = set(q.split())
     normalized_column_words = {
@@ -1809,7 +1812,8 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
         # Example: "Which product has maximum revenue in the West?"
         # Filter Region=West, then aggregate Revenue by Product and rank it.
         asks_filtered_ranking = (
-            metric_col is not None
+            not missing_requested_fields
+            and metric_col is not None
             and product_col is not None
             and (asks_high or asks_low)
             and has("product", "products", "item", "items")
@@ -1854,7 +1858,8 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
         # Example: "Total revenue for Laptop and Phone".
         # Detect every product value mentioned, filter to those products, and sum.
         if (
-            metric_col is not None
+            not missing_requested_fields
+            and metric_col is not None
             and product_col is not None
             and (
                 asks_total
@@ -1887,8 +1892,9 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
         print(f"Deterministic filtered analysis skipped: {type(exc).__name__}: {exc}")
 
 
-    # Ask for clarification when a grouping question does not identify
-    # a category and multiple categorical columns are available.
+    # Ask for clarification only when the user requested grouping but did not
+    # identify a category column. Use only columns that actually exist in the
+    # uploaded dataset, and never override a missing-field error.
     ambiguous_grouping = (
         asks_grouping
         and selected_category is None
@@ -1898,102 +1904,105 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
         and not missing_requested_fields
     )
 
-    if ambiguous_grouping:
+    if ambiguous_grouping and answer is None:
         available_categories = ", ".join(
             f"`{column}`" for column in categorical_columns
         )
         answer = (
             "Which column should I group by? "
             f"Available categorical columns: {available_categories}.\n\n"
-            "For example, ask me to group Sales by `Branch` "
-            "or by `Department`."
+            "Please specify one of the available columns."
         )
-    # Missing-value answers are also deterministic.
 
-    if answer is None:
+    # The language model should generate the user-facing answer for every
+    # substantive question. Pandas/tool results and any deterministic calculation
+    # above are evidence only, not canned responses.
+    answer_provider = "clarification" if (missing_requested_fields or ambiguous_grouping) else provider
 
+    if not missing_requested_fields and not ambiguous_grouping:
+        verified_draft = answer
         try:
-
-            answer = generate_text(
+            model_answer = generate_text(
                 provider,
                 [
-
                     {
-
                         "role": "system",
-
                         "content": (
-
-                            "You are InsightAI, a precise data analyst. "
-
-                            "Use only the verified results provided. "
-
-                            "Never invent or alter numbers or row details. "
-
-                            "Distinguish individual records from grouped "
-
-                            "totals. If evidence is missing, say so. "
-
-                            "Use readable Markdown."
-
+                            "You are InsightAI, an AI data analyst. Answer the user's "
+                            "actual question using only the uploaded dataset's verified "
+                            "analysis results supplied below. The deterministic computed "
+                            "answer, if present, is a verified fact source, not text to "
+                            "blindly copy. Explain the result clearly in concise Markdown. "
+                            "Preserve all figures, category names, column names, record "
+                            "details, and ties exactly. Do not invent calculations, rows, "
+                            "or claims. If the available evidence does not answer the "
+                            "question, say what is missing and ask a focused follow-up."
                         ),
-
                     },
-
                     {
-
                         "role": "user",
-
                         "content": (
-
-                            f"Dataset: {item['filename']}\n"
-
-                            f"Question: {question}\n\n"
-
-                            "Verified results:\n"
-
+                            f"Dataset filename: {item['filename']}\n"
+                            f"User question: {question}\n\n"
+                            "Verified computed answer (may be null):\n"
+                            f"{verified_draft or 'null'}\n\n"
+                            "Verified analysis results (calculated from the uploaded data):\n"
                             + json.dumps(
-
                                 verified_results,
-
                                 default=str,
-
                                 ensure_ascii=False,
-
                             )
-
                         ),
-
                     },
-
                 ],
                 api_key=api_key,
                 model=model,
             )
-            if not answer:
-                answer = "Analysis completed, but no explanation was returned."
-
+            if model_answer and model_answer.strip():
+                answer = model_answer.strip()
+                answer_provider = provider
+            elif verified_draft:
+                answer = verified_draft
+                answer_provider = "verified_fallback"
+            else:
+                answer = "The AI provider returned an empty answer. Please try rephrasing the question."
+                answer_provider = "provider_error"
         except Exception as exc:
-
             print(
-
-                f"Ollama explanation error: {type(exc).__name__}: {exc}"
-
+                f"{provider.title()} answer generation error: "
+                f"{type(exc).__name__}: {exc}"
             )
-
-            answer = (
-
-                "The requested analysis could not be explained by Ollama. "
-
-                "Check the Ollama service and backend logs."
-
-            )
+            if verified_draft:
+                # Keep a verified calculation available if the model is offline;
+                # explicitly identify this as a fallback in the response metadata.
+                answer = verified_draft
+                answer_provider = "verified_fallback"
+            else:
+                detail = str(exc)
+                if provider == "gemini" and (not api_key or not api_key.strip()):
+                    answer = "Enter your Gemini API key or switch to Ollama."
+                else:
+                    answer = (
+                        f"I couldn't generate an AI answer using {provider.title()}. "
+                        "Check the selected provider, model/API key, and backend logs."
+                    )
+                answer_provider = "provider_error"
+            tool_history.append({
+                "tool": "generate_answer",
+                "status": "failed",
+                "arguments": {"provider": provider, "model": model},
+                "error": type(exc).__name__,
+            })
+    elif answer is None:
+        answer = "I couldn't determine a safe answer. Please clarify the requested field or grouping column."
 
 
 
     return {
 
         "answer": answer,
+
+        "answerProvider": answer_provider,
 
         "toolCalls": tool_history,
 
@@ -2051,7 +2060,7 @@ def create_dashboard_plan(
     api_key: str | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
-    """Ask Ollama to recommend charts using dataset metadata only."""
+    """Ask the selected AI provider to recommend charts from metadata only."""
 
     columns = []
 
