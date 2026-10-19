@@ -363,27 +363,57 @@ export default function App() {
               </button>
             </div>
 
+            {dashboardLoading && (
+              <div className="dashboard-loading" role="status" aria-live="polite">
+                <span className="dashboard-loading-spinner" />
+                <div>
+                  <strong>Building your dashboard</strong>
+                  <p>Analysing columns, selecting charts, and calculating metrics…</p>
+                </div>
+              </div>
+            )}
+
             {dashboard && (
               <>
+                <div className="dashboard-overview-bar">
+                  <div>
+                    <span className="dashboard-overline">GENERATED FROM YOUR DATA</span>
+                    <h3>{dashboard.filename || dataset.filename}</h3>
+                    <p>
+                      {Number(dashboard.rowCount ?? profile?.rowCount ?? 0).toLocaleString()} rows
+                      <span className="overview-separator">·</span>
+                      {Number(dashboard.columnCount ?? profile?.columnCount ?? 0).toLocaleString()} columns
+                      <span className="overview-separator">·</span>
+                      {Number(dashboard.charts?.length || 0)} visualisations
+                    </p>
+                  </div>
+                  <span className="dashboard-planner-badge">
+                    <span className="dashboard-planner-dot" />
+                    {dashboard.planner || "Dashboard ready"}
+                  </span>
+                </div>
+
                 <div className="dashboard-kpis">
                   {(dashboard.kpis || []).map((kpi, index) => (
                     <article
-                      className="stat-card"
+                      className={`stat-card dashboard-kpi-card kpi-${kpi.kind || "metric"}`}
                       key={`${kpi.label}-${index}`}
                     >
                       <span>{kpi.label}</span>
                       <strong>
                         {typeof kpi.value === "number"
-                          ? kpi.value.toLocaleString(undefined, {
-                              maximumFractionDigits: 2,
-                            })
+                          ? (/(revenue|sales|turnover|profit|income|amount|price|cost|spend|expense)/i.test(kpi.label)
+                              ? new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(kpi.value)
+                              : new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(kpi.value))
                           : String(kpi.value ?? "—")}
                       </strong>
+                      {kpi.detail && <small>{kpi.detail}</small>}
                     </article>
                   ))}
                 </div>
 
-                <div className="dashboard-charts">
+                {(dashboard.charts || []).length > 0 ? (
+                <div className={`dashboard-charts dashboard-charts-count-${(dashboard.charts || []).length}`}>
                   {(dashboard.charts || []).map((chart, index) => {
                     const chartData = (chart.data || []).map((item) => ({
                       ...item,
@@ -483,6 +513,13 @@ export default function App() {
                     );
                   })}
                 </div>
+                ) : (
+                  <div className="dashboard-empty-state">
+                    <BarChart3 size={28} />
+                    <h3>No suitable charts found</h3>
+                    <p>This dataset was loaded, but InsightAI could not find enough suitable fields to visualise. Try another dataset or review its column types.</p>
+                  </div>
+                )}
 
                 <article className="panel insights-card">
                   <h3>Key findings</h3>
@@ -497,11 +534,6 @@ export default function App() {
                   )}
                 </article>
 
-                {dashboard.planner && (
-                  <p className="planner-status">
-                    Dashboard planner: {dashboard.planner}
-                  </p>
-                )}
               </>
             )}
           </section>

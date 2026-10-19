@@ -10,6 +10,8 @@ from typing import Any
 
 import ollama
 
+import re
+
 import pandas as pd
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -46,7 +48,7 @@ app.add_middleware(
 
     allow_credentials=False,
 
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
 
     allow_headers=["Content-Type"],
 
@@ -1684,7 +1686,9 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
 
         )
 
-
+        # Keep this initialized even if the group tool failed or returned no
+        # results, so the answer path can safely fall through to the LLM.
+        valid_rows = []
 
         if matching_group and matching_group.get("results"):
 
@@ -1918,6 +1922,139 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
         # Preserve the normal agent flow if a dataset has unusual column types.
         print(f"Deterministic filtered analysis skipped: {type(exc).__name__}: {exc}")
 
+
+    # AI-assisted fallback planner: use the selected language model to map
+    # unfamiliar natural-language questions to existing, approved analysis
+    # operations. The model chooses intent/columns only; Pandas tools calculate
+    # all values, and every proposed column is validated against the real schema.
+    if answer is None and not missing_requested_fields:
+        try:
+            schema = {
+                "numeric_columns": numeric_columns,
+                "categorical_columns": categorical_columns,
+                "columns": [
+                    {"name": str(column), "dtype": str(df[column].dtype)}
+                    for column in df.columns
+                ],
+            }
+            planner_text = generate_text(
+                provider,
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a query planner for a data-analysis application. "
+                            "Return one JSON object only. Do not calculate values and do "
+                            "not write code. Choose only exact column names from the "
+                            "provided schema. Supported intents: aggregate, group, rank, "
+                            "unsupported. Supported aggregations: sum, avg, count, min, max. "
+                            "Use group or rank when the user asks for results by a category. "
+                            "For rank, use direction desc for highest/top and asc for lowest. "
+                            "If the question is ambiguous or cannot be represented safely, "
+                            "use unsupported and null column names. Schema: "
+                            + json.dumps(schema, ensure_ascii=False)
+                        ),
+                    },
+                    {"role": "user", "content": question},
+                ],
+                api_key=api_key,
+                model=model,
+                json_mode=True,
+            )
+            plan = json.loads(planner_text)
+            intent = plan.get("intent")
+            planned_metric = plan.get("metric_column")
+            planned_category = plan.get("category_column")
+            aggregation = plan.get("aggregation", "sum")
+            direction = plan.get("direction", "desc")
+
+            if aggregation not in {"sum", "avg", "count", "min", "max"}:
+                aggregation = None
+
+            # Do not accept invented columns or unsupported operations.
+            metric_valid = planned_metric in df.columns if planned_metric is not None else False
+            category_valid = planned_category in df.columns if planned_category is not None else False
+            metric_is_numeric = metric_valid and is_numeric_column(df[planned_metric])
+
+            if intent == "aggregate" and metric_is_numeric and aggregation:
+                summary = run_tool("summarize_column", {"column": planned_metric})
+                if "error" not in summary:
+                    verified_results["numeric_summaries"].append(summary)
+                    metric_column = planned_metric
+                    result_key = {
+                        "sum": "sum", "avg": "mean", "count": "count",
+                        "min": "min", "max": "max",
+                    }[aggregation]
+                    answer = (
+                        f"Verified {aggregation} for {planned_metric}: "
+                        f"{fmt(summary[result_key])}."
+                    )
+                    tool_history.append({
+                        "tool": "ai_planned_aggregate",
+                        "status": "completed",
+                        "arguments": {
+                            "metric_column": planned_metric,
+                            "aggregation": aggregation,
+                        },
+                    })
+
+            elif intent in {"group", "rank"} and category_valid and aggregation in {"sum", "avg", "count"}:
+                if aggregation == "count" or metric_is_numeric:
+                    # A count groups records, so any existing column can be used
+                    # as the required value-column argument.
+                    value_column = planned_metric if metric_valid else (
+                        numeric_columns[0] if numeric_columns else str(df.columns[0])
+                    )
+                    if value_column in df.columns:
+                        grouped = run_tool(
+                            "group_by",
+                            {
+                                "category_column": planned_category,
+                                "value_column": value_column,
+                                "aggregation": aggregation,
+                            },
+                        )
+                        if "error" not in grouped and grouped.get("results"):
+                            verified_results["grouped_results"].append(grouped)
+                            selected_category = planned_category
+                            metric_column = value_column
+                            if intent == "rank":
+                                ordered = sorted(
+                                    grouped["results"],
+                                    key=lambda row: (
+                                        row.get("value") is not None,
+                                        row.get("value") if row.get("value") is not None else 0,
+                                    ),
+                                    reverse=(direction != "asc"),
+                                )
+                                winner = ordered[0]
+                                answer = (
+                                    f"**{winner['group']}** ranks first for {planned_category} "
+                                    f"by {aggregation} of {value_column}: **{fmt(winner['value'])}**."
+                                )
+                            else:
+                                preview = "; ".join(
+                                    f"{row['group']}: {fmt(row['value'])}"
+                                    for row in grouped["results"][:10]
+                                )
+                                answer = (
+                                    f"Verified {aggregation} of {value_column} by "
+                                    f"{planned_category}: {preview}."
+                                )
+                            tool_history.append({
+                                "tool": "ai_planned_" + intent,
+                                "status": "completed",
+                                "arguments": {
+                                    "category_column": planned_category,
+                                    "value_column": value_column,
+                                    "aggregation": aggregation,
+                                    "direction": direction,
+                                },
+                            })
+        except Exception as exc:
+            # Planning is an optional fallback. Existing deterministic analysis
+            # and clarification behavior must continue if the provider fails.
+            print(f"AI query planning skipped: {type(exc).__name__}: {exc}")
 
     # Ask for clarification only when the user requested grouping but did not
     # identify a category column. Use only columns that actually exist in the
@@ -2557,147 +2694,204 @@ def build_fallback_charts(df: pd.DataFrame) -> list[dict[str, Any]]:
 
 # ==========================================
 
-@app.post("/api/datasets/{dataset_id}/dashboard")
-def generate_dashboard(
-    dataset_id: str,
-    request: DashboardRequest,
-):
 
-    item = get_dataset(dataset_id)
+def choose_dashboard_kpis(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Select meaningful, data-driven KPI cards."""
+    import re
 
-    df = item["df"]
+    def normalize(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
 
     numeric_columns = [
-
-        column for column in df.columns
-
+        str(column)
+        for column in df.columns
         if is_numeric_column(df[column])
-
     ]
 
-    # Compute KPI values directly from the dataset.
+    categorical_columns = [
+        str(column)
+        for column in df.columns
+        if not is_numeric_column(df[column])
+    ]
 
-    kpis = [
+    kpis: list[dict[str, Any]] = []
 
-        {
+    # Identify a likely business metric by its name.
+    metric_terms = (
+        "revenue", "sales", "profit", "amount",
+        "income", "cost", "price", "value"
+    )
 
+    metric_column = next(
+        (
+            column for term in metric_terms
+            for column in numeric_columns
+            if term in normalize(column).split()
+        ),
+        numeric_columns[0] if numeric_columns else None,
+    )
+
+    if metric_column is not None:
+        values = pd.to_numeric(df[metric_column], errors="coerce").dropna()
+
+        if not values.empty:
+            metric_name = metric_column.strip()
+            total_label = (
+                f"Total {metric_name}"
+                if normalize(metric_name) not in {"revenue", "sales", "profit"}
+                else f"Total {metric_name}"
+            )
+
+            kpis.append({
+                "label": total_label,
+                "value": dashboard_number(values.sum()),
+                "kind": "metric",
+                "column": metric_column,
+            })
+
+            kpis.append({
+                "label": f"Average {metric_name}",
+                "value": dashboard_number(values.mean()),
+                "kind": "metric",
+                "column": metric_column,
+            })
+
+    # Add distinct category counts, prioritizing useful business dimensions.
+    preferred_terms = (
+        "product", "category", "region", "customer",
+        "department", "segment", "store", "country"
+    )
+
+    ordered_categories = sorted(
+        categorical_columns,
+        key=lambda column: (
+            next(
+                (
+                    index for index, term in enumerate(preferred_terms)
+                    if term in normalize(column).split()
+                ),
+                len(preferred_terms),
+            ),
+            column.lower(),
+        ),
+    )
+
+    for column in ordered_categories:
+        distinct_count = int(df[column].nunique(dropna=True))
+
+        if distinct_count == 0:
+            continue
+
+        normalized_name = normalize(column)
+        label = f"{column.strip().title()}s"
+
+        # Use a readable singular/plural label for common dimensions.
+        if normalized_name == "category":
+            label = "Categories"
+        elif normalized_name == "country":
+            label = "Countries"
+        elif normalized_name == "people":
+            label = "People"
+
+        kpis.append({
+            "label": label,
+            "value": distinct_count,
+            "kind": "count",
+            "column": column,
+        })
+
+        if len(kpis) >= 4:
+            break
+
+    # Keep a useful KPI for datasets with very few usable columns.
+    if not kpis:
+        kpis.append({
             "label": "Total records",
-
-            "value": len(df),
-
-        }
-
-    ]
-
-    for column in numeric_columns[:3]:
-
-        values = pd.to_numeric(
-
-            df[column], errors="coerce"
-
-        ).dropna()
-
-        if values.empty:
-
-            continue
-
-        kpis.append({
-
-            "label": f"Total {column}",
-
-            "value": dashboard_number(values.sum()),
-
+            "value": int(len(df)),
+            "kind": "count",
         })
 
-        kpis.append({
-
-            "label": f"Average {column}",
-
-            "value": dashboard_number(values.mean()),
-
-        })
-
-    # Ask AI for a chart plan. Use a deterministic fallback on failure.
-
-    try:
-
-        plan = create_dashboard_plan(
-            df,
-            provider=request.provider,
-            api_key=request.apiKey,
-            model=request.model,
-        )
-
-        charts = build_dashboard_charts(df, plan)
-
-        planner = "AI"
-
-        if not charts:
-
-            charts = build_fallback_charts(df)
-
-            planner = "Rules-based fallback"
-
-    except Exception as exc:
-
-        print(
-
-            f"Dashboard planner error: {type(exc).__name__}: {exc}"
-
-        )
-
-        charts = build_fallback_charts(df)
-
-        planner = "Rules-based fallback"
+    return kpis[:4]
 
 
-    insights = []
 
+def build_dashboard_insights(df: pd.DataFrame, charts: list[dict[str, Any]]) -> list[str]:
+    """Create grounded findings from calculated chart data and dataset quality."""
+    insights: list[str] = []
     for chart in charts:
-        valid_data = [
-            row for row in chart.get("data", [])
-            if row.get("value") is not None
-        ]
-
-        if not valid_data:
+        data = [row for row in chart.get("data", []) if isinstance(row.get("value"), (int, float)) and row.get("value") is not None]
+        if not data:
             continue
-
+        ordered = sorted(data, key=lambda row: row["value"], reverse=True)
+        top, bottom = ordered[0], ordered[-1]
         aggregation = chart.get("aggregation", "sum")
         metric = chart.get("metric", "value")
         category = chart.get("category", "category")
-        top = max(valid_data, key=lambda row: row["value"])
+        agg_label = {"sum": "total", "avg": "average", "count": "record count"}.get(aggregation, aggregation)
+        insights.append(f"{top['category']} has the highest {agg_label} {metric} among the displayed {category} groups ({top['value']:,}).")
+        if len(ordered) >= 2:
+            positive_total = sum(max(0, row["value"]) for row in data)
+            if positive_total > 0:
+                share = top["value"] / positive_total * 100
+                insights.append(f"{top['category']} contributes {share:.1f}% of the displayed {metric} total in this chart.")
+            if top["category"] != bottom["category"] and top["value"] != bottom["value"]:
+                insights.append(f"The gap between {top['category']} and {bottom['category']} is {top['value'] - bottom['value']:,.2f} in {metric}.")
+        if len(insights) >= 6:
+            break
 
-        if aggregation == "count":
-            finding = (
-                f"{top['category']} has the most records "
-                f"among the displayed {category} groups: "
-                f"{dashboard_number(top['value'])}."
-            )
-        elif aggregation == "avg":
-            finding = (
-                f"{top['category']} has the highest average "
-                f"{metric} among the displayed {category} groups: "
-                f"{dashboard_number(top['value'])}."
-            )
-        else:
-            finding = (
-                f"{top['category']} has the highest total "
-                f"{metric} among the displayed {category} groups: "
-                f"{dashboard_number(top['value'])}."
-            )
+    missing_by_column = df.isna().sum()
+    missing_by_column = missing_by_column[missing_by_column > 0].sort_values(ascending=False)
+    if not missing_by_column.empty:
+        column = str(missing_by_column.index[0])
+        count = int(missing_by_column.iloc[0])
+        pct = count / max(1, len(df)) * 100
+        insights.append(f"{column} has {count:,} missing values ({pct:.1f}% of rows); review this field before relying on analyses that use it.")
 
-        insights.append(finding)
-
-    for column in numeric_columns[:2]:
+    for column in df.columns:
+        if not is_numeric_column(df[column]):
+            continue
         values = pd.to_numeric(df[column], errors="coerce").dropna()
+        if len(values) < 8:
+            continue
+        q1, q3 = values.quantile([0.25, 0.75])
+        iqr = q3 - q1
+        if iqr <= 0:
+            continue
+        outlier_count = int(((values < q1 - 1.5 * iqr) | (values > q3 + 1.5 * iqr)).sum())
+        if outlier_count:
+            insights.append(f"{column} contains {outlier_count:,} potential outlier values under the 1.5×IQR rule; inspect them before drawing conclusions.")
+            break
 
-        if not values.empty:
-            insights.append(
-                f"{column}: total {dashboard_number(values.sum())}; "
-                f"average {dashboard_number(values.mean())} across "
-                f"{len(values)} non-missing numeric records."
-            )
+    if not insights:
+        insights.append("The dataset loaded successfully, but there is not enough grouped numeric information to produce additional summary findings.")
+    unique_insights: list[str] = []
+    for insight in insights:
+        if insight not in unique_insights:
+            unique_insights.append(insight)
+        if len(unique_insights) >= 8:
+            break
+    return unique_insights
 
+
+@app.post("/api/datasets/{dataset_id}/dashboard")
+def generate_dashboard(dataset_id: str, request: DashboardRequest):
+    item = get_dataset(dataset_id)
+    df = item["df"]
+    kpis = choose_dashboard_kpis(df)
+
+    try:
+        plan = create_dashboard_plan(df, provider=request.provider, api_key=request.apiKey, model=request.model)
+        charts = build_dashboard_charts(df, plan)
+        planner = "AI"
+        if not charts:
+            charts = build_fallback_charts(df)
+            planner = "Rules-based fallback"
+    except Exception as exc:
+        print(f"Dashboard planner error: {type(exc).__name__}: {exc}")
+        charts = build_fallback_charts(df)
+        planner = "Rules-based fallback"
+
+    insights = build_dashboard_insights(df, charts)
     return {
         "datasetId": dataset_id,
         "filename": item["filename"],
@@ -2707,5 +2901,5 @@ def generate_dashboard(
         "missingValues": int(df.isna().sum().sum()),
         "kpis": kpis,
         "charts": charts,
-        "insights": insights[:8],
+        "insights": insights,
     }

@@ -102,7 +102,8 @@ def test_missing_values():
         dataset_id, "Are there any missing values in this dataset?"
     )
 
-    assert "2" in result["answer"]
+    answer = result["answer"].lower()
+    assert "2" in answer or "two" in answer
 
 
 def test_group_by_tool():
