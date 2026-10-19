@@ -348,3 +348,38 @@ def test_agent_ranks_groups_using_explicitly_requested_metric():
     assert "South" in result["answer"]
     assert "15" in result["answer"]
     assert "Units Sold" in result["answer"]
+
+
+def test_agent_groups_by_explicitly_mentioned_custom_category():
+    df = pd.DataFrame({
+        "Sales Channel": ["Online", "Retail", "Online"],
+        "Transaction Value": [100, 200, 300],
+    })
+    dataset_id = register_dataset(df)
+
+    result = run_analysis_agent(
+        dataset_id,
+        "Which Sales Channel has the highest total Transaction Value?",
+    )
+
+    assert "Online" in result["answer"]
+    assert "400" in result["answer"]
+    assert "Transaction Value" in result["answer"]
+
+
+def test_agent_uses_custom_category_for_grouped_summary():
+    df = pd.DataFrame({
+        "Branch": ["Pune", "Mumbai", "Pune"],
+        "Units Sold": [10, 20, 15],
+    })
+    dataset_id = register_dataset(df)
+
+    result = run_analysis_agent(
+        dataset_id,
+        "Show total Units Sold by Branch",
+    )
+
+    assert "Pune" in result["answer"]
+    assert "Mumbai" in result["answer"]
+    assert "25" in result["answer"]
+    assert "20" in result["answer"]
