@@ -313,3 +313,38 @@ def test_agent_rejects_unavailable_employee_salary():
     assert "salary" in answer
     assert "revenue" not in answer or "available columns" in answer
     assert "50000" not in answer
+
+
+def test_agent_uses_explicitly_requested_numeric_column():
+    df = pd.DataFrame({
+        "Product": ["Laptop", "Phone", "Tablet"],
+        "Revenue": [50000, 30000, 20000],
+        "Units Sold": [5, 7, 15],
+    })
+    dataset_id = register_dataset(df)
+
+    result = run_analysis_agent(
+        dataset_id,
+        "What is the average Units Sold?",
+    )
+
+    assert "9" in result["answer"]
+    assert "Units Sold" in result["answer"]
+
+
+def test_agent_ranks_groups_using_explicitly_requested_metric():
+    df = pd.DataFrame({
+        "Market": ["North", "North", "South"],
+        "Revenue": [50000, 30000, 20000],
+        "Units Sold": [5, 7, 15],
+    })
+    dataset_id = register_dataset(df)
+
+    result = run_analysis_agent(
+        dataset_id,
+        "Which market has the highest total Units Sold?",
+    )
+
+    assert "South" in result["answer"]
+    assert "15" in result["answer"]
+    assert "Units Sold" in result["answer"]

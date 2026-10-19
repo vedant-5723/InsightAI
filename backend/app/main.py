@@ -1331,19 +1331,18 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
 
         })
 
-
-
     # Choose the metric required by the question.
 
     metrics_to_summarize = []
 
     mentioned_metric = find_mentioned(numeric_columns)
 
-
-
+    # An explicitly requested numeric column takes priority over
+    # the default business metric, such as Revenue or Sales.
     if mentioned_metric:
-
+        metric_column = mentioned_metric
         metrics_to_summarize = [mentioned_metric]
+
 
     elif metric_column and (
 
