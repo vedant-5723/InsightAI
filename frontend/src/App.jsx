@@ -57,6 +57,34 @@ async function readResponse(response) {
   return data;
 }
 
+function formatMetricValue(label, value) {
+  const numericValue = Number(value);
+
+  if (!Number.isFinite(numericValue)) {
+    return String(value ?? "—");
+  }
+
+  if (
+    /(revenue|sales|turnover|profit|income|amount|price|cost|spend|expense|salary)/i.test(label)
+  ) {
+    return new Intl.NumberFormat("en-IN", {
+      style: "currency",
+      currency: "INR",
+      maximumFractionDigits: 0,
+    }).format(numericValue);
+  }
+
+  if (/(conversion rate|attrition rate|bounce rate|percentage|percent|rate)/i.test(label)) {
+    return `${new Intl.NumberFormat("en-IN", {
+      maximumFractionDigits: 2,
+    }).format(numericValue)}%`;
+  }
+
+  return new Intl.NumberFormat("en-IN", {
+    maximumFractionDigits: 2,
+  }).format(numericValue);
+}
+
 export default function App() {
   const [apiStatus, setApiStatus] = useState("Checking...");
   const [message, setMessage] = useState("");
@@ -402,9 +430,7 @@ export default function App() {
                       <span>{kpi.label}</span>
                       <strong>
                         {typeof kpi.value === "number"
-                          ? (/(revenue|sales|turnover|profit|income|amount|price|cost|spend|expense)/i.test(kpi.label)
-                              ? new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(kpi.value)
-                              : new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(kpi.value))
+                          ? formatMetricValue(kpi.label, kpi.value)
                           : String(kpi.value ?? "—")}
                       </strong>
                       {kpi.detail && <small>{kpi.detail}</small>}
@@ -469,7 +495,12 @@ export default function App() {
                                       />
                                     ))}
                                   </Pie>
-                                  <Tooltip />
+                                  <Tooltip
+                                    formatter={(value, name) => [
+                                      formatMetricValue(chart.metric || chart.title || name, value),
+                                      chart.metric || name,
+                                    ]}
+                                  />
                                   <Legend />
                                 </PieChart>
                               ) : chartType === "line" ? (
@@ -477,7 +508,12 @@ export default function App() {
                                   <CartesianGrid strokeDasharray="3 3" />
                                   <XAxis dataKey="category" />
                                   <YAxis />
-                                  <Tooltip />
+                                  <Tooltip
+                                    formatter={(value, name) => [
+                                      formatMetricValue(chart.metric || chart.title || name, value),
+                                      chart.metric || name,
+                                    ]}
+                                  />
                                   <Legend />
                                   <Line
                                     type="monotone"
@@ -493,7 +529,12 @@ export default function App() {
                                   <CartesianGrid strokeDasharray="3 3" />
                                   <XAxis dataKey="category" />
                                   <YAxis />
-                                  <Tooltip />
+                                  <Tooltip
+                                    formatter={(value, name) => [
+                                      formatMetricValue(chart.metric || chart.title || name, value),
+                                      chart.metric || name,
+                                    ]}
+                                  />
                                   <Legend />
                                   <Area type="monotone" dataKey="value" name={chart.metric || chart.title || "Value"} stroke="#5471e8" fill="#5471e8" fillOpacity={0.18} />
                                 </AreaChart>
@@ -501,7 +542,12 @@ export default function App() {
                                 <BarChart data={chartData} layout={chartType === "horizontal" ? "vertical" : "horizontal"}>
                                   <CartesianGrid strokeDasharray="3 3" />
                                   {chartType === "horizontal" ? <><XAxis type="number" /><YAxis type="category" dataKey="category" width={100} /></> : <><XAxis dataKey="category" /><YAxis /></>}
-                                  <Tooltip />
+                                  <Tooltip
+                                    formatter={(value, name) => [
+                                      formatMetricValue(chart.metric || chart.title || name, value),
+                                      chart.metric || name,
+                                    ]}
+                                  />
                                   <Legend />
                                   <Bar dataKey="value" name={chart.metric || chart.title || "Value"} fill="#5471e8" radius={[5, 5, 0, 0]} />
                                 </BarChart>

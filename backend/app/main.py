@@ -10,7 +10,7 @@ from typing import Any
 
 import ollama
 
-import re
+import re 
 
 import pandas as pd
 
@@ -1370,36 +1370,38 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
 
         })
 
-    # Choose the metric required by the question.
+    # Choose the metric(s) required by the question.
 
     metrics_to_summarize = []
-
     mentioned_metric = find_mentioned(numeric_columns)
 
-    # An explicitly requested numeric column takes priority over
-    # the default business metric, such as Revenue or Sales.
-    if mentioned_metric:
+    # For multi-metric totals (e.g. "total revenue and total profit"),
+    # summarize every numeric column whose meaningful name tokens appear in
+    # the question. Ignore unit/identifier tokens such as INR and ID.
+    ignored_metric_tokens = {"inr", "usd", "eur", "id", "no", "number", "total", "sum", "overall"}
+    question_tokens = set(q.split())
+    explicitly_mentioned_metrics = []
+    for column in numeric_columns:
+        column_tokens = set(normalize(column).split()) - ignored_metric_tokens
+        if column_tokens and column_tokens.intersection(question_tokens):
+            explicitly_mentioned_metrics.append(column)
+
+    if asks_total and len(explicitly_mentioned_metrics) > 1:
+        metrics_to_summarize = explicitly_mentioned_metrics
+        metric_column = explicitly_mentioned_metrics[0]
+    elif mentioned_metric:
+        # An explicitly requested numeric column takes priority over the
+        # default business metric, such as Revenue or Sales.
         metric_column = mentioned_metric
         metrics_to_summarize = [mentioned_metric]
-
-
     elif metric_column and (
-
         asks_average or asks_total or asks_high or asks_low
-
         or asks_grouping or full_analysis
-
         or has("revenue", "sales", "profit", "amount", "value")
-
     ):
-
         metrics_to_summarize = [metric_column]
-
     elif full_analysis:
-
         metrics_to_summarize = numeric_columns[:10]
-
-
 
     for column in metrics_to_summarize:
 
@@ -1772,6 +1774,22 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
 
 
 
+    # Answer explicit requests for totals across multiple numeric metrics.
+    if answer is None and asks_total and len(metrics_to_summarize) > 1 and not asks_grouping:
+        total_parts = []
+        for requested_metric in metrics_to_summarize:
+            summary = next(
+                (entry for entry in verified_results["numeric_summaries"]
+                 if entry.get("column") == requested_metric),
+                None,
+            )
+            if summary is not None:
+                total_parts.append(
+                    f"**Total {requested_metric}: {fmt(summary.get('sum'))}**"
+                )
+        if total_parts:
+            answer = "\n\n".join(total_parts) + "."
+
     # Simple totals and averages.
 
     if answer is None and metric_column:
@@ -2122,12 +2140,15 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
                 api_key=api_key,
                 model=model,
             )
-            if model_answer and model_answer.strip():
+            if verified_draft:
+                # Never let free-form model text overwrite a deterministic
+                # answer calculated from the uploaded DataFrame. The model is
+                # used for questions that do not yet have a verified answer.
+                answer = verified_draft
+                answer_provider = "verified_calculation"
+            elif model_answer and model_answer.strip():
                 answer = model_answer.strip()
                 answer_provider = provider
-            elif verified_draft:
-                answer = verified_draft
-                answer_provider = "verified_fallback"
             else:
                 answer = "The AI provider returned an empty answer. Please try rephrasing the question."
                 answer_provider = "provider_error"
@@ -2694,125 +2715,79 @@ def build_fallback_charts(df: pd.DataFrame) -> list[dict[str, Any]]:
 
 # ==========================================
 
-
 def choose_dashboard_kpis(df: pd.DataFrame) -> list[dict[str, Any]]:
-    """Select meaningful, data-driven KPI cards."""
-    import re
-
-    def normalize(value: Any) -> str:
-        return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
-
-    numeric_columns = [
-        str(column)
-        for column in df.columns
-        if is_numeric_column(df[column])
+    """Select meaningful, dataset-aware KPI cards without inventing comparisons."""
+    kpis: list[dict[str, Any]] = [
+        {"label": "Total records", "value": int(len(df)), "kind": "count"}
     ]
+    if df.empty:
+        return kpis
 
-    categorical_columns = [
-        str(column)
-        for column in df.columns
-        if not is_numeric_column(df[column])
+    numeric_columns = [str(c) for c in df.columns if is_numeric_column(df[c])]
+    normalized_names = {
+        str(c): re.sub(r"[^a-z0-9]+", " ", str(c).lower()).strip()
+        for c in df.columns
+    }
+    metric_priority = [
+        (("revenue", "sales", "turnover"), "Total"),
+        (("profit", "margin", "earnings", "income"), "Total"),
+        (("amount", "value", "price", "cost", "spend", "expense"), "Total"),
+        (("quantity", "units", "items", "orders", "transactions"), "Total"),
+        (("score", "rating", "satisfaction", "duration", "days"), "Average"),
     ]
-
-    kpis: list[dict[str, Any]] = []
-
-    # Identify a likely business metric by its name.
-    metric_terms = (
-        "revenue", "sales", "profit", "amount",
-        "income", "cost", "price", "value"
-    )
-
-    metric_column = next(
-        (
-            column for term in metric_terms
-            for column in numeric_columns
-            if term in normalize(column).split()
-        ),
-        numeric_columns[0] if numeric_columns else None,
-    )
-
-    if metric_column is not None:
-        values = pd.to_numeric(df[metric_column], errors="coerce").dropna()
-
-        if not values.empty:
-            metric_name = metric_column.strip()
-            total_label = (
-                f"Total {metric_name}"
-                if normalize(metric_name) not in {"revenue", "sales", "profit"}
-                else f"Total {metric_name}"
-            )
-
-            kpis.append({
-                "label": total_label,
-                "value": dashboard_number(values.sum()),
-                "kind": "metric",
-                "column": metric_column,
-            })
-
-            kpis.append({
-                "label": f"Average {metric_name}",
-                "value": dashboard_number(values.mean()),
-                "kind": "metric",
-                "column": metric_column,
-            })
-
-    # Add distinct category counts, prioritizing useful business dimensions.
-    preferred_terms = (
-        "product", "category", "region", "customer",
-        "department", "segment", "store", "country"
-    )
-
-    ordered_categories = sorted(
-        categorical_columns,
-        key=lambda column: (
-            next(
-                (
-                    index for index, term in enumerate(preferred_terms)
-                    if term in normalize(column).split()
-                ),
-                len(preferred_terms),
-            ),
-            column.lower(),
-        ),
-    )
-
-    for column in ordered_categories:
-        distinct_count = int(df[column].nunique(dropna=True))
-
-        if distinct_count == 0:
-            continue
-
-        normalized_name = normalize(column)
-        label = f"{column.strip().title()}s"
-
-        # Use a readable singular/plural label for common dimensions.
-        if normalized_name == "category":
-            label = "Categories"
-        elif normalized_name == "country":
-            label = "Countries"
-        elif normalized_name == "people":
-            label = "People"
-
-        kpis.append({
-            "label": label,
-            "value": distinct_count,
-            "kind": "count",
-            "column": column,
-        })
-
-        if len(kpis) >= 4:
+    selected: list[tuple[str, str]] = []
+    used: set[str] = set()
+    for aliases, aggregation in metric_priority:
+        for column in numeric_columns:
+            words = normalized_names[column].split()
+            if column not in used and any(alias in words for alias in aliases):
+                selected.append((column, aggregation))
+                used.add(column)
+                break
+        if len(selected) >= 3:
             break
 
-    # Keep a useful KPI for datasets with very few usable columns.
-    if not kpis:
-        kpis.append({
-            "label": "Total records",
-            "value": int(len(df)),
-            "kind": "count",
-        })
+    if not selected:
+        for column in numeric_columns:
+            if re.search(r"\b(id|code|zip|postal|year|index|row|record)\b", normalized_names[column]):
+                continue
+            selected.append((column, "Total"))
+            used.add(column)
+            if len(selected) >= 2:
+                break
 
-    return kpis[:4]
+    for column, aggregation in selected:
+        values = pd.to_numeric(df[column], errors="coerce").dropna()
+        if values.empty:
+            continue
+        if aggregation == "Average":
+            kpis.append({"label": f"Average {column}", "value": dashboard_number(values.mean()), "kind": "metric", "column": column})
+        else:
+            kpis.append({"label": f"Total {column}", "value": dashboard_number(values.sum()), "kind": "metric", "column": column})
+            # An average complements a single dominant business metric, where meaningful.
+            if len(selected) == 1 and any(term in normalized_names[column].split() for term in ("revenue", "sales", "amount", "price", "value")):
+                kpis.append({"label": f"Average {column}", "value": dashboard_number(values.mean()), "kind": "metric", "column": column})
 
+    # Categorical cardinality KPIs help explain the scope of a dataset.
+    # Exclude identifier-like fields and near-unique columns such as customer IDs.
+    for column in df.columns:
+        if len(kpis) >= 4:
+            break
+        name = normalized_names[str(column)]
+        if is_numeric_column(df[column]) or re.search(r"\b(id|uuid|code|email|phone|address)\b", name):
+            continue
+        values = df[column].dropna()
+        unique_count = int(values.nunique())
+        if 1 < unique_count <= min(20, max(2, int(len(df) * 0.8))):
+            label = f"Unique {str(column).strip()}"
+            if not any(item["label"].lower() == label.lower() for item in kpis):
+                kpis.append({"label": label, "value": unique_count, "kind": "dimension", "column": str(column)})
+
+    missing = int(df.isna().sum().sum())
+    if missing:
+        total_cells = max(1, int(df.shape[0] * df.shape[1]))
+        kpis.append({"label": "Missing values", "value": missing, "kind": "quality", "detail": f"{round(missing / total_cells * 100, 2)}% of all cells"})
+    return kpis[:5]
 
 
 def build_dashboard_insights(df: pd.DataFrame, charts: list[dict[str, Any]]) -> list[str]:
@@ -2835,7 +2810,7 @@ def build_dashboard_insights(df: pd.DataFrame, charts: list[dict[str, Any]]) -> 
                 share = top["value"] / positive_total * 100
                 insights.append(f"{top['category']} contributes {share:.1f}% of the displayed {metric} total in this chart.")
             if top["category"] != bottom["category"] and top["value"] != bottom["value"]:
-                insights.append(f"The gap between {top['category']} and {bottom['category']} is {top['value'] - bottom['value']:,.2f} in {metric}.")
+                insights.append(f"The gap between {top['category']} and {bottom['category']} is {top['value'] - bottom['value']:,.0f} in {metric}.")
         if len(insights) >= 6:
             break
 
