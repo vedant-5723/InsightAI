@@ -666,7 +666,7 @@ export default function App() {
                 </div>
 
                 <h3>Data preview</h3>
-                <div className="table-scroll">
+                <div className="table-scroll data-preview-scroll">
                   <table>
                     <thead>
                       <tr>

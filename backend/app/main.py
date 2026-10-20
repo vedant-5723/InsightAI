@@ -485,7 +485,7 @@ def preview_dataset(dataset_id: str):
 
     rows = []
 
-    for row in df.head(10).to_dict(orient="records"):
+    for row in df.to_dict(orient="records"):
 
         rows.append({
 
