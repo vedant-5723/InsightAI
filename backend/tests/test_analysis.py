@@ -102,7 +102,8 @@ def test_missing_values():
         dataset_id, "Are there any missing values in this dataset?"
     )
 
-    assert "2" in result["answer"]
+    answer = result["answer"].lower()
+    assert "2" in answer or "two" in answer
 
 
 def test_group_by_tool():
@@ -313,3 +314,92 @@ def test_agent_rejects_unavailable_employee_salary():
     assert "salary" in answer
     assert "revenue" not in answer or "available columns" in answer
     assert "50000" not in answer
+
+
+def test_agent_uses_explicitly_requested_numeric_column():
+    df = pd.DataFrame({
+        "Product": ["Laptop", "Phone", "Tablet"],
+        "Revenue": [50000, 30000, 20000],
+        "Units Sold": [5, 7, 15],
+    })
+    dataset_id = register_dataset(df)
+
+    result = run_analysis_agent(
+        dataset_id,
+        "What is the average Units Sold?",
+    )
+
+    assert "9" in result["answer"]
+    assert "Units Sold" in result["answer"]
+
+
+def test_agent_ranks_groups_using_explicitly_requested_metric():
+    df = pd.DataFrame({
+        "Market": ["North", "North", "South"],
+        "Revenue": [50000, 30000, 20000],
+        "Units Sold": [5, 7, 15],
+    })
+    dataset_id = register_dataset(df)
+
+    result = run_analysis_agent(
+        dataset_id,
+        "Which market has the highest total Units Sold?",
+    )
+
+    assert "South" in result["answer"]
+    assert "15" in result["answer"]
+    assert "Units Sold" in result["answer"]
+
+
+def test_agent_groups_by_explicitly_mentioned_custom_category():
+    df = pd.DataFrame({
+        "Sales Channel": ["Online", "Retail", "Online"],
+        "Transaction Value": [100, 200, 300],
+    })
+    dataset_id = register_dataset(df)
+
+    result = run_analysis_agent(
+        dataset_id,
+        "Which Sales Channel has the highest total Transaction Value?",
+    )
+
+    assert "Online" in result["answer"]
+    assert "400" in result["answer"]
+    assert "Transaction Value" in result["answer"]
+
+
+def test_agent_uses_custom_category_for_grouped_summary():
+    df = pd.DataFrame({
+        "Branch": ["Pune", "Mumbai", "Pune"],
+        "Units Sold": [10, 20, 15],
+    })
+    dataset_id = register_dataset(df)
+
+    result = run_analysis_agent(
+        dataset_id,
+        "Show total Units Sold by Branch",
+    )
+
+    assert "Pune" in result["answer"]
+    assert "Mumbai" in result["answer"]
+    assert "25" in result["answer"]
+    assert "20" in result["answer"]
+
+
+def test_agent_asks_for_clarification_when_grouping_is_ambiguous():
+    df = pd.DataFrame({
+        "Branch": ["Pune", "Mumbai", "Pune"],
+        "Department": ["Sales", "IT", "IT"],
+        "Sales": [100, 200, 300],
+    })
+    dataset_id = register_dataset(df)
+
+    result = run_analysis_agent(
+        dataset_id,
+        "Show total Sales by category",
+    )
+
+    answer = result["answer"]
+    assert "Which column should I group by?" in answer
+    assert "Branch" in answer
+    assert "Department" in answer

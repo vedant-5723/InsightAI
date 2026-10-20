@@ -1,55 +1,51 @@
 # InsightAI — AI Data Analyst & Dashboard Generator
 
-InsightAI is an AI-powered data analysis application that helps users explore datasets, generate visual dashboards, and ask questions about their data using natural language. It combines a React-based interface, a Python backend, data analysis tools, and configurable AI providers.
+InsightAI is an AI-powered data analytics application that helps users explore datasets, ask questions in natural language, and generate interactive dashboards. It combines AI-assisted analysis with backend data-processing tools to turn raw data into actionable insights.
 
-The project is designed to make data exploration more accessible while keeping the application runnable locally.
+## Key Features
 
-## Features
+- **Dataset Upload:** Import CSV and Excel datasets.
+- **Data Profiling:** Inspect data types, missing values, distinct values, and dataset dimensions.
+- **AI Data Analyst:** Ask natural-language questions about uploaded datasets.
+- **Tool-Assisted Analysis:** Perform summaries, aggregations, grouping, top-value analysis, and filtered calculations.
+- **Automated Dashboard Generation:** Generate KPI cards, visualizations, and key findings from uploaded data.
+- **Interactive Charts:** Switch between supported visualization types.
+- **Multiple AI Providers:** Use a local Ollama model or Google Gemini with your own API key.
+- **Responsive Interface:** Navigate between Overview, Datasets, and AI Analyst.
 
-- **Dataset upload:** Upload CSV and Excel files for analysis.
-- **Automated data profiling:** Inspect dataset structure, column types, and missing values.
-- **Statistical analysis:** Generate summaries and perform aggregations, grouping, filtering, and top-value analysis.
-- **Interactive dashboards:** View key performance indicators and charts generated from uploaded data.
-- **AI data analyst:** Ask natural-language questions about datasets.
-- **Multiple AI providers:** Supports Ollama for local inference and Gemini as an alternative provider.
-- **Error handling:** Handle common analysis and data-processing errors.
-- **Automated tests:** Includes backend tests for analysis functionality.
+## Tech Stack
 
-## Technology Stack
-
-| Component | Technology |
+| Component | Technologies |
 |---|---|
-| Frontend | React, Vite, JavaScript |
+| Frontend | React, Vite, JavaScript, CSS |
 | Backend | Python, FastAPI |
-| Data analysis | Python data-processing libraries |
-| Local AI | Ollama |
-| Alternative AI provider | Gemini API |
+| Data Processing | Pandas |
+| Visualization | Recharts |
+| Icons | Lucide React |
+| AI Integration | Ollama, Google Gemini |
 | Testing | pytest |
-| Version control | Git and GitHub |
 
 ## Architecture
 
 ```text
 User
-  |
-  v
+ |
+ v
 React + Vite Frontend
-  |
-  v
-Python / FastAPI Backend
-  |
-  +--> Dataset Processing
-  |      +--> Data Profiling
-  |      +--> Aggregation and Filtering
-  |      +--> Analysis Results
-  |
-  +--> AI Provider
-         +--> Ollama
-         +--> Gemini
-  |
-  v
-Dashboard and Natural-Language Insights
+ |
+ v
+FastAPI Backend
+ |
+ +-- Dataset Profiling
+ |
+ +-- Data Analysis Tools
+ |
+ +-- Dashboard Generation
+ |
+ +-- Ollama / Google Gemini
 ```
+
+The backend processes datasets and performs numerical calculations. AI models assist with interpreting user questions and planning dashboard content, while analysis tools provide data-grounded results.
 
 ## Project Structure
 
@@ -57,37 +53,24 @@ Dashboard and Natural-Language Insights
 InsightAI/
 ├── backend/
 │   ├── app/
-│   │   ├── __init__.py
 │   │   └── main.py
-│   ├── tests/
-│   │   └── test_analysis.py
-│   ├── test_insightai_providers.py
-│   └── requirements.txt
-├── frontend/
-│   ├── public/
-│   ├── src/
-│   │   ├── App.jsx
-│   │   ├── App.css
-│   │   ├── index.css
-│   │   └── main.jsx
-│   ├── package.json
-│   └── vite.config.js
-├── sales.csv
-├── .gitignore
-└── README.md
+│   └── tests/
+│       └── test_analysis.py
+└── frontend/
+    ├── src/
+    │   ├── App.jsx
+    │   └── index.css
+    └── package.json
 ```
 
-## Prerequisites
+## Getting Started
 
-Install the following before running the application:
+### Prerequisites
 
-- Python 3.10 or a compatible version supported by the backend dependencies
+- Python 3.10 or a compatible version
 - Node.js and npm
 - Git
-- Ollama, if using the local AI provider
-- A Gemini API key, if using the Gemini provider
-
-## Local Setup
+- Ollama for local model execution, or a Google Gemini API key
 
 ### 1. Clone the repository
 
@@ -96,28 +79,31 @@ git clone https://github.com/vedant-5723/InsightAI.git
 cd InsightAI
 ```
 
-### 2. Set up the Python backend
+### 2. Start the backend
 
-Open a terminal in the project root and run:
+Open a terminal:
 
 ```powershell
 cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
 ```
 
-Start the backend:
+Install the dependencies using the dependency file included in the repository. If it is named `requirements.txt`:
 
 ```powershell
-python -m uvicorn app.main:app --reload
+pip install -r requirements.txt
 ```
 
-Keep this terminal open while using the application.
+If the FastAPI application is exposed as `app` in `app/main.py`, start it with:
 
-### 3. Set up the frontend
+```powershell
+uvicorn app.main:app --reload
+```
 
-Open a second terminal:
+### 3. Start the frontend
+
+Open a second terminal from the repository root:
 
 ```powershell
 cd frontend
@@ -125,75 +111,55 @@ npm install
 npm run dev
 ```
 
-Open the local URL printed by Vite in your terminal, commonly `http://localhost:5173`.
+Open the local URL displayed by Vite, usually `http://localhost:5173`.
 
 ### 4. Configure an AI provider
 
-**Ollama**
+**Ollama:** Ensure Ollama is running and that the model configured in the backend is installed.
 
-Install and start Ollama, then download the model configured for the project. The current development setup uses `qwen2.5:3b`.
+**Google Gemini:** Select Gemini in the application and provide your API key. Never commit API keys to GitHub.
 
-```bash
-ollama pull qwen2.5:3b
-```
+### 5. Run backend tests
 
-Ensure the model is available locally and that the application's provider configuration matches it.
-
-**Gemini**
-
-Select the Gemini provider and configure your own API key using the application's supported configuration. Do not commit real API keys to GitHub or place them in source code.
-
-## Running Tests
-
-From the backend directory, activate the virtual environment and run:
+From the backend environment:
 
 ```powershell
-python -m pytest -v
+pytest
 ```
 
-The latest recorded development test run passed all 15 tests. Run the tests again against your current checkout to verify its status.
+## Example Workflow
 
-To check Python syntax:
+1. Upload a CSV or Excel dataset.
+2. Review the dataset profile and preview.
+3. Ask the AI Analyst a question about the data.
+4. Generate a dashboard.
+5. Explore KPIs, charts, and key findings.
 
-```powershell
-python -m compileall app
-```
+### Example Questions
 
-To build the frontend:
+- What is the total revenue?
+- Which product generates the highest revenue?
+- Compare revenue across regions.
+- Identify missing values in the dataset.
+- Summarize the important patterns in the data.
 
-```powershell
-cd ..\frontend
-npm run build
-```
+## Testing
 
-## Sample Dataset
-
-The repository includes `sales.csv`, a synthetic sales dataset intended for demonstration and testing.
-
-Use it to explore data summaries, product and regional revenue, dashboard charts, and natural-language analysis.
-
-## Data and Security Notes
-
-- Do not commit API keys, passwords, access tokens, or private environment files.
-- Use synthetic or appropriately authorized datasets.
-- Review `.gitignore` before committing local files.
-- The current development application uses in-memory dataset handling; do not assume uploaded datasets persist across backend restarts.
-- Run the application locally and verify provider configuration before relying on analysis results.
-
-## Current Status
-
-InsightAI is an actively developed local application. The project includes dataset analysis, AI-assisted question answering, dashboard visualizations, and backend tests.
-
-Public deployment has not been established as part of this setup. Feature availability and compatibility should be verified against the current codebase.
+The project includes backend analysis tests. Validate the application after code changes by running the test suite and checking the complete upload, analysis, and dashboard-generation workflow.
 
 ## Future Improvements
 
-- More configurable chart types and dashboard controls
-- Improved conversational context for follow-up questions
-- Downloadable analysis reports
-- Enhanced validation and error messages
-- More comprehensive testing and deployment documentation
+- Dashboard and analysis exports
+- Improved dataset session management
+- Automated frontend and API integration tests
+- Deployment configuration and production security hardening
+
+## Author
+
+**Vedant Nikam**
+
+GitHub: https://github.com/vedant-5723
 
 ---
 
-**Built as a practical project combining data analysis, dashboard development, Python backend engineering, and large language model integration.**
+*InsightAI — turning data into decisions through AI-assisted analytics.*

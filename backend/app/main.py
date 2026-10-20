@@ -1,4 +1,4 @@
-import io
+﻿import io
 
 import json
 
@@ -9,6 +9,8 @@ import uuid
 from typing import Any
 
 import ollama
+
+import re 
 
 import pandas as pd
 
@@ -46,7 +48,7 @@ app.add_middleware(
 
     allow_credentials=False,
 
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
 
     allow_headers=["Content-Type"],
 
@@ -60,8 +62,10 @@ MAX_ROWS = 100_000
 
 MAX_COLUMNS = 200
 
-# Prototype storage. Data is lost when the backend restarts.
+# Keep prototype memory usage bounded. Oldest datasets are evicted first.
+MAX_STORED_DATASETS = 5
 
+# In-memory storage; data is lost when the backend restarts.
 datasets: dict[str, dict[str, Any]] = {}
 
 # ==========================================
@@ -104,7 +108,7 @@ def generate_text(provider: str, messages: list[dict[str, str]], api_key: str | 
         if json_mode:
             config["response_mime_type"] = "application/json"
         response = client.models.generate_content(
-            model=(model or "gemini-3.8-flash"),
+            model=(model or "gemini-2.5-flash"),
             contents=prompt,
             config=config,
         )
@@ -250,7 +254,7 @@ def chat(request: ChatRequest):
             api_key=request.apiKey,
             model=request.model,
         )
-        return {"reply": reply, "model": request.model or ("gemini-3.8-flash" if request.provider == "gemini" else MODEL), "provider": request.provider}
+        return {"reply": reply, "model": request.model or ("gemini-2.5-flash" if request.provider == "gemini" else MODEL), "provider": request.provider}
 
     except Exception as exc:
 
@@ -358,7 +362,8 @@ async def upload_dataset(file: UploadFile = File(...)):
 
             detail=(
 
-                f"Could not read file: {type(exc).__name__}: {exc}"
+                "Could not read this file. Check that it is a valid, "
+                "supported CSV or Excel file and try again."
 
             ),
 
@@ -418,6 +423,12 @@ async def upload_dataset(file: UploadFile = File(...)):
 
     dataset_id = str(uuid.uuid4())
 
+    # Python dictionaries preserve insertion order, so evict the oldest
+    # uploaded dataset before storing another one at the configured limit.
+    while len(datasets) >= MAX_STORED_DATASETS:
+        oldest_dataset_id = next(iter(datasets))
+        datasets.pop(oldest_dataset_id, None)
+
     datasets[dataset_id] = {
 
         "filename": filename,
@@ -442,6 +453,24 @@ async def upload_dataset(file: UploadFile = File(...)):
 
 # ==========================================
 
+# DATASET LIFECYCLE
+
+# ==========================================
+
+@app.delete("/api/datasets/{dataset_id}")
+def delete_dataset(dataset_id: str):
+    """Release a dataset from in-memory storage when the client is done."""
+    if dataset_id not in datasets:
+        raise HTTPException(
+            status_code=404,
+            detail="Dataset not found. It may already have been removed.",
+        )
+
+    datasets.pop(dataset_id, None)
+    return {"deleted": True, "datasetId": dataset_id}
+
+# ==========================================
+
 # DATA PREVIEW
 
 # ==========================================
@@ -456,7 +485,7 @@ def preview_dataset(dataset_id: str):
 
     rows = []
 
-    for row in df.head(10).to_dict(orient="records"):
+    for row in df.to_dict(orient="records"):
 
         rows.append({
 
@@ -1184,9 +1213,19 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
         normalized_question = f" {q} "
         for raw_value in df[category_candidate].dropna().unique():
             value_text = str(raw_value).strip()
+
             normalized_value = normalize(value_text)
             if not normalized_value:
                 continue
+
+            # Do not mistake the requested numeric metric for a
+            # categorical value when its name also appears in the data.
+            if (
+                metric_column is not None
+                and normalized_value == normalize(str(metric_column))
+            ):
+                continue
+
             if re.search(r"\b" + re.escape(normalized_value) + r"\b", normalized_question):
                 if selected_category_value is None or len(normalized_value) > len(normalize(selected_category_value)):
                     selected_category_value = value_text
@@ -1331,37 +1370,38 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
 
         })
 
-
-
-    # Choose the metric required by the question.
+    # Choose the metric(s) required by the question.
 
     metrics_to_summarize = []
-
     mentioned_metric = find_mentioned(numeric_columns)
 
+    # For multi-metric totals (e.g. "total revenue and total profit"),
+    # summarize every numeric column whose meaningful name tokens appear in
+    # the question. Ignore unit/identifier tokens such as INR and ID.
+    ignored_metric_tokens = {"inr", "usd", "eur", "id", "no", "number", "total", "sum", "overall"}
+    question_tokens = set(q.split())
+    explicitly_mentioned_metrics = []
+    for column in numeric_columns:
+        column_tokens = set(normalize(column).split()) - ignored_metric_tokens
+        if column_tokens and column_tokens.intersection(question_tokens):
+            explicitly_mentioned_metrics.append(column)
 
-
-    if mentioned_metric:
-
+    if asks_total and len(explicitly_mentioned_metrics) > 1:
+        metrics_to_summarize = explicitly_mentioned_metrics
+        metric_column = explicitly_mentioned_metrics[0]
+    elif mentioned_metric:
+        # An explicitly requested numeric column takes priority over the
+        # default business metric, such as Revenue or Sales.
+        metric_column = mentioned_metric
         metrics_to_summarize = [mentioned_metric]
-
     elif metric_column and (
-
         asks_average or asks_total or asks_high or asks_low
-
         or asks_grouping or full_analysis
-
         or has("revenue", "sales", "profit", "amount", "value")
-
     ):
-
         metrics_to_summarize = [metric_column]
-
     elif full_analysis:
-
         metrics_to_summarize = numeric_columns[:10]
-
-
 
     for column in metrics_to_summarize:
 
@@ -1387,8 +1427,10 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
 
         category_columns = categorical_columns[:5]
 
-    elif asks_grouping and categorical_columns:
+    elif asks_grouping and len(categorical_columns) == 1:
 
+        # A sole categorical column is an unambiguous default. If several
+        # categorical columns exist, leave grouping unresolved and ask the user.
         category_columns = categorical_columns[:1]
 
 
@@ -1480,6 +1522,7 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
         "customer": {"customer", "customers", "client", "clients"},
         "profit": {"profit", "profits"},
         "revenue": {"revenue", "sales", "turnover"},
+        "branch": {"branch", "branches"},
     }
     question_terms = set(q.split())
     normalized_column_words = {
@@ -1645,7 +1688,9 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
 
         )
 
-
+        # Keep this initialized even if the group tool failed or returned no
+        # results, so the answer path can safely fall through to the LLM.
+        valid_rows = []
 
         if matching_group and matching_group.get("results"):
 
@@ -1729,6 +1774,22 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
 
 
 
+    # Answer explicit requests for totals across multiple numeric metrics.
+    if answer is None and asks_total and len(metrics_to_summarize) > 1 and not asks_grouping:
+        total_parts = []
+        for requested_metric in metrics_to_summarize:
+            summary = next(
+                (entry for entry in verified_results["numeric_summaries"]
+                 if entry.get("column") == requested_metric),
+                None,
+            )
+            if summary is not None:
+                total_parts.append(
+                    f"**Total {requested_metric}: {fmt(summary.get('sum'))}**"
+                )
+        if total_parts:
+            answer = "\n\n".join(total_parts) + "."
+
     # Simple totals and averages.
 
     if answer is None and metric_column:
@@ -1800,7 +1861,8 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
         # Example: "Which product has maximum revenue in the West?"
         # Filter Region=West, then aggregate Revenue by Product and rank it.
         asks_filtered_ranking = (
-            metric_col is not None
+            not missing_requested_fields
+            and metric_col is not None
             and product_col is not None
             and (asks_high or asks_low)
             and has("product", "products", "item", "items")
@@ -1845,7 +1907,8 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
         # Example: "Total revenue for Laptop and Phone".
         # Detect every product value mentioned, filter to those products, and sum.
         if (
-            metric_col is not None
+            not missing_requested_fields
+            and metric_col is not None
             and product_col is not None
             and (
                 asks_total
@@ -1877,94 +1940,254 @@ def run_analysis_agent(dataset_id: str, question: str, provider: str = "ollama",
         # Preserve the normal agent flow if a dataset has unusual column types.
         print(f"Deterministic filtered analysis skipped: {type(exc).__name__}: {exc}")
 
-    # Missing-value answers are also deterministic.
 
-
-
-    if answer is None:
-
+    # AI-assisted fallback planner: use the selected language model to map
+    # unfamiliar natural-language questions to existing, approved analysis
+    # operations. The model chooses intent/columns only; Pandas tools calculate
+    # all values, and every proposed column is validated against the real schema.
+    if answer is None and not missing_requested_fields:
         try:
-
-            answer = generate_text(
+            schema = {
+                "numeric_columns": numeric_columns,
+                "categorical_columns": categorical_columns,
+                "columns": [
+                    {"name": str(column), "dtype": str(df[column].dtype)}
+                    for column in df.columns
+                ],
+            }
+            planner_text = generate_text(
                 provider,
                 [
-
                     {
-
                         "role": "system",
-
                         "content": (
-
-                            "You are InsightAI, a precise data analyst. "
-
-                            "Use only the verified results provided. "
-
-                            "Never invent or alter numbers or row details. "
-
-                            "Distinguish individual records from grouped "
-
-                            "totals. If evidence is missing, say so. "
-
-                            "Use readable Markdown."
-
+                            "You are a query planner for a data-analysis application. "
+                            "Return one JSON object only. Do not calculate values and do "
+                            "not write code. Choose only exact column names from the "
+                            "provided schema. Supported intents: aggregate, group, rank, "
+                            "unsupported. Supported aggregations: sum, avg, count, min, max. "
+                            "Use group or rank when the user asks for results by a category. "
+                            "For rank, use direction desc for highest/top and asc for lowest. "
+                            "If the question is ambiguous or cannot be represented safely, "
+                            "use unsupported and null column names. Schema: "
+                            + json.dumps(schema, ensure_ascii=False)
                         ),
-
                     },
+                    {"role": "user", "content": question},
+                ],
+                api_key=api_key,
+                model=model,
+                json_mode=True,
+            )
+            plan = json.loads(planner_text)
+            intent = plan.get("intent")
+            planned_metric = plan.get("metric_column")
+            planned_category = plan.get("category_column")
+            aggregation = plan.get("aggregation", "sum")
+            direction = plan.get("direction", "desc")
 
+            if aggregation not in {"sum", "avg", "count", "min", "max"}:
+                aggregation = None
+
+            # Do not accept invented columns or unsupported operations.
+            metric_valid = planned_metric in df.columns if planned_metric is not None else False
+            category_valid = planned_category in df.columns if planned_category is not None else False
+            metric_is_numeric = metric_valid and is_numeric_column(df[planned_metric])
+
+            if intent == "aggregate" and metric_is_numeric and aggregation:
+                summary = run_tool("summarize_column", {"column": planned_metric})
+                if "error" not in summary:
+                    verified_results["numeric_summaries"].append(summary)
+                    metric_column = planned_metric
+                    result_key = {
+                        "sum": "sum", "avg": "mean", "count": "count",
+                        "min": "min", "max": "max",
+                    }[aggregation]
+                    answer = (
+                        f"Verified {aggregation} for {planned_metric}: "
+                        f"{fmt(summary[result_key])}."
+                    )
+                    tool_history.append({
+                        "tool": "ai_planned_aggregate",
+                        "status": "completed",
+                        "arguments": {
+                            "metric_column": planned_metric,
+                            "aggregation": aggregation,
+                        },
+                    })
+
+            elif intent in {"group", "rank"} and category_valid and aggregation in {"sum", "avg", "count"}:
+                if aggregation == "count" or metric_is_numeric:
+                    # A count groups records, so any existing column can be used
+                    # as the required value-column argument.
+                    value_column = planned_metric if metric_valid else (
+                        numeric_columns[0] if numeric_columns else str(df.columns[0])
+                    )
+                    if value_column in df.columns:
+                        grouped = run_tool(
+                            "group_by",
+                            {
+                                "category_column": planned_category,
+                                "value_column": value_column,
+                                "aggregation": aggregation,
+                            },
+                        )
+                        if "error" not in grouped and grouped.get("results"):
+                            verified_results["grouped_results"].append(grouped)
+                            selected_category = planned_category
+                            metric_column = value_column
+                            if intent == "rank":
+                                ordered = sorted(
+                                    grouped["results"],
+                                    key=lambda row: (
+                                        row.get("value") is not None,
+                                        row.get("value") if row.get("value") is not None else 0,
+                                    ),
+                                    reverse=(direction != "asc"),
+                                )
+                                winner = ordered[0]
+                                answer = (
+                                    f"**{winner['group']}** ranks first for {planned_category} "
+                                    f"by {aggregation} of {value_column}: **{fmt(winner['value'])}**."
+                                )
+                            else:
+                                preview = "; ".join(
+                                    f"{row['group']}: {fmt(row['value'])}"
+                                    for row in grouped["results"][:10]
+                                )
+                                answer = (
+                                    f"Verified {aggregation} of {value_column} by "
+                                    f"{planned_category}: {preview}."
+                                )
+                            tool_history.append({
+                                "tool": "ai_planned_" + intent,
+                                "status": "completed",
+                                "arguments": {
+                                    "category_column": planned_category,
+                                    "value_column": value_column,
+                                    "aggregation": aggregation,
+                                    "direction": direction,
+                                },
+                            })
+        except Exception as exc:
+            # Planning is an optional fallback. Existing deterministic analysis
+            # and clarification behavior must continue if the provider fails.
+            print(f"AI query planning skipped: {type(exc).__name__}: {exc}")
+
+    # Ask for clarification only when the user requested grouping but did not
+    # identify a category column. Use only columns that actually exist in the
+    # uploaded dataset, and never override a missing-field error.
+    ambiguous_grouping = (
+        asks_grouping
+        and selected_category is None
+        and selected_category_value_column is None
+        and not full_analysis
+        and len(categorical_columns) > 1
+        and not missing_requested_fields
+    )
+
+    if ambiguous_grouping and answer is None:
+        available_categories = ", ".join(
+            f"`{column}`" for column in categorical_columns
+        )
+        answer = (
+            "Which column should I group by? "
+            f"Available categorical columns: {available_categories}.\n\n"
+            "Please specify one of the available columns."
+        )
+
+    # The language model should generate the user-facing answer for every
+    # substantive question. Pandas/tool results and any deterministic calculation
+    # above are evidence only, not canned responses.
+    answer_provider = "clarification" if (missing_requested_fields or ambiguous_grouping) else provider
+
+    if not missing_requested_fields and not ambiguous_grouping:
+        verified_draft = answer
+        try:
+            model_answer = generate_text(
+                provider,
+                [
                     {
-
-                        "role": "user",
-
+                        "role": "system",
                         "content": (
-
-                            f"Dataset: {item['filename']}\n"
-
-                            f"Question: {question}\n\n"
-
-                            "Verified results:\n"
-
-                            + json.dumps(
-
-                                verified_results,
-
-                                default=str,
-
-                                ensure_ascii=False,
-
-                            )
-
+                            "You are InsightAI, an AI data analyst. Answer the user's "
+                            "actual question using only the uploaded dataset's verified "
+                            "analysis results supplied below. The deterministic computed "
+                            "answer, if present, is a verified fact source, not text to "
+                            "blindly copy. Explain the result clearly in concise Markdown. "
+                            "Preserve all figures, category names, column names, record "
+                            "details, and ties exactly. Do not invent calculations, rows, "
+                            "or claims. If the available evidence does not answer the "
+                            "question, say what is missing and ask a focused follow-up."
                         ),
-
                     },
-
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Dataset filename: {item['filename']}\n"
+                            f"User question: {question}\n\n"
+                            "Verified computed answer (may be null):\n"
+                            f"{verified_draft or 'null'}\n\n"
+                            "Verified analysis results (calculated from the uploaded data):\n"
+                            + json.dumps(
+                                verified_results,
+                                default=str,
+                                ensure_ascii=False,
+                            )
+                        ),
+                    },
                 ],
                 api_key=api_key,
                 model=model,
             )
-            if not answer:
-                answer = "Analysis completed, but no explanation was returned."
-
+            if verified_draft:
+                # Never let free-form model text overwrite a deterministic
+                # answer calculated from the uploaded DataFrame. The model is
+                # used for questions that do not yet have a verified answer.
+                answer = verified_draft
+                answer_provider = "verified_calculation"
+            elif model_answer and model_answer.strip():
+                answer = model_answer.strip()
+                answer_provider = provider
+            else:
+                answer = "The AI provider returned an empty answer. Please try rephrasing the question."
+                answer_provider = "provider_error"
         except Exception as exc:
-
             print(
-
-                f"Ollama explanation error: {type(exc).__name__}: {exc}"
-
+                f"{provider.title()} answer generation error: "
+                f"{type(exc).__name__}: {exc}"
             )
-
-            answer = (
-
-                "The requested analysis could not be explained by Ollama. "
-
-                "Check the Ollama service and backend logs."
-
-            )
+            if verified_draft:
+                # Keep a verified calculation available if the model is offline;
+                # explicitly identify this as a fallback in the response metadata.
+                answer = verified_draft
+                answer_provider = "verified_fallback"
+            else:
+                detail = str(exc)
+                if provider == "gemini" and (not api_key or not api_key.strip()):
+                    answer = "Enter your Gemini API key or switch to Ollama."
+                else:
+                    answer = (
+                        f"I couldn't generate an AI answer using {provider.title()}. "
+                        "Check the selected provider, model/API key, and backend logs."
+                    )
+                answer_provider = "provider_error"
+            tool_history.append({
+                "tool": "generate_answer",
+                "status": "failed",
+                "arguments": {"provider": provider, "model": model},
+                "error": type(exc).__name__,
+            })
+    elif answer is None:
+        answer = "I couldn't determine a safe answer. Please clarify the requested field or grouping column."
 
 
 
     return {
 
         "answer": answer,
+
+        "answerProvider": answer_provider,
 
         "toolCalls": tool_history,
 
@@ -2022,7 +2245,7 @@ def create_dashboard_plan(
     api_key: str | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
-    """Ask Ollama to recommend charts using dataset metadata only."""
+    """Ask the selected AI provider to recommend charts from metadata only."""
 
     columns = []
 
@@ -2492,147 +2715,158 @@ def build_fallback_charts(df: pd.DataFrame) -> list[dict[str, Any]]:
 
 # ==========================================
 
-@app.post("/api/datasets/{dataset_id}/dashboard")
-def generate_dashboard(
-    dataset_id: str,
-    request: DashboardRequest,
-):
-
-    item = get_dataset(dataset_id)
-
-    df = item["df"]
-
-    numeric_columns = [
-
-        column for column in df.columns
-
-        if is_numeric_column(df[column])
-
+def choose_dashboard_kpis(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Select meaningful, dataset-aware KPI cards without inventing comparisons."""
+    kpis: list[dict[str, Any]] = [
+        {"label": "Total records", "value": int(len(df)), "kind": "count"}
     ]
+    if df.empty:
+        return kpis
 
-    # Compute KPI values directly from the dataset.
-
-    kpis = [
-
-        {
-
-            "label": "Total records",
-
-            "value": len(df),
-
-        }
-
+    numeric_columns = [str(c) for c in df.columns if is_numeric_column(df[c])]
+    normalized_names = {
+        str(c): re.sub(r"[^a-z0-9]+", " ", str(c).lower()).strip()
+        for c in df.columns
+    }
+    metric_priority = [
+        (("revenue", "sales", "turnover"), "Total"),
+        (("profit", "margin", "earnings", "income"), "Total"),
+        (("amount", "value", "price", "cost", "spend", "expense"), "Total"),
+        (("quantity", "units", "items", "orders", "transactions"), "Total"),
+        (("score", "rating", "satisfaction", "duration", "days"), "Average"),
     ]
+    selected: list[tuple[str, str]] = []
+    used: set[str] = set()
+    for aliases, aggregation in metric_priority:
+        for column in numeric_columns:
+            words = normalized_names[column].split()
+            if column not in used and any(alias in words for alias in aliases):
+                selected.append((column, aggregation))
+                used.add(column)
+                break
+        if len(selected) >= 3:
+            break
 
-    for column in numeric_columns[:3]:
+    if not selected:
+        for column in numeric_columns:
+            if re.search(r"\b(id|code|zip|postal|year|index|row|record)\b", normalized_names[column]):
+                continue
+            selected.append((column, "Total"))
+            used.add(column)
+            if len(selected) >= 2:
+                break
 
-        values = pd.to_numeric(
-
-            df[column], errors="coerce"
-
-        ).dropna()
-
+    for column, aggregation in selected:
+        values = pd.to_numeric(df[column], errors="coerce").dropna()
         if values.empty:
-
             continue
+        if aggregation == "Average":
+            kpis.append({"label": f"Average {column}", "value": dashboard_number(values.mean()), "kind": "metric", "column": column})
+        else:
+            kpis.append({"label": f"Total {column}", "value": dashboard_number(values.sum()), "kind": "metric", "column": column})
+            # An average complements a single dominant business metric, where meaningful.
+            if len(selected) == 1 and any(term in normalized_names[column].split() for term in ("revenue", "sales", "amount", "price", "value")):
+                kpis.append({"label": f"Average {column}", "value": dashboard_number(values.mean()), "kind": "metric", "column": column})
 
-        kpis.append({
+    # Categorical cardinality KPIs help explain the scope of a dataset.
+    # Exclude identifier-like fields and near-unique columns such as customer IDs.
+    for column in df.columns:
+        if len(kpis) >= 4:
+            break
+        name = normalized_names[str(column)]
+        if is_numeric_column(df[column]) or re.search(r"\b(id|uuid|code|email|phone|address)\b", name):
+            continue
+        values = df[column].dropna()
+        unique_count = int(values.nunique())
+        if 1 < unique_count <= min(20, max(2, int(len(df) * 0.8))):
+            label = f"Unique {str(column).strip()}"
+            if not any(item["label"].lower() == label.lower() for item in kpis):
+                kpis.append({"label": label, "value": unique_count, "kind": "dimension", "column": str(column)})
 
-            "label": f"Total {column}",
-
-            "value": dashboard_number(values.sum()),
-
-        })
-
-        kpis.append({
-
-            "label": f"Average {column}",
-
-            "value": dashboard_number(values.mean()),
-
-        })
-
-    # Ask AI for a chart plan. Use a deterministic fallback on failure.
-
-    try:
-
-        plan = create_dashboard_plan(
-            df,
-            provider=request.provider,
-            api_key=request.apiKey,
-            model=request.model,
-        )
-
-        charts = build_dashboard_charts(df, plan)
-
-        planner = "AI"
-
-        if not charts:
-
-            charts = build_fallback_charts(df)
-
-            planner = "Rules-based fallback"
-
-    except Exception as exc:
-
-        print(
-
-            f"Dashboard planner error: {type(exc).__name__}: {exc}"
-
-        )
-
-        charts = build_fallback_charts(df)
-
-        planner = "Rules-based fallback"
+    missing = int(df.isna().sum().sum())
+    if missing:
+        total_cells = max(1, int(df.shape[0] * df.shape[1]))
+        kpis.append({"label": "Missing values", "value": missing, "kind": "quality", "detail": f"{round(missing / total_cells * 100, 2)}% of all cells"})
+    return kpis[:5]
 
 
-    insights = []
-
+def build_dashboard_insights(df: pd.DataFrame, charts: list[dict[str, Any]]) -> list[str]:
+    """Create grounded findings from calculated chart data and dataset quality."""
+    insights: list[str] = []
     for chart in charts:
-        valid_data = [
-            row for row in chart.get("data", [])
-            if row.get("value") is not None
-        ]
-
-        if not valid_data:
+        data = [row for row in chart.get("data", []) if isinstance(row.get("value"), (int, float)) and row.get("value") is not None]
+        if not data:
             continue
-
+        ordered = sorted(data, key=lambda row: row["value"], reverse=True)
+        top, bottom = ordered[0], ordered[-1]
         aggregation = chart.get("aggregation", "sum")
         metric = chart.get("metric", "value")
         category = chart.get("category", "category")
-        top = max(valid_data, key=lambda row: row["value"])
+        agg_label = {"sum": "total", "avg": "average", "count": "record count"}.get(aggregation, aggregation)
+        insights.append(f"{top['category']} has the highest {agg_label} {metric} among the displayed {category} groups ({top['value']:,}).")
+        if len(ordered) >= 2:
+            positive_total = sum(max(0, row["value"]) for row in data)
+            if positive_total > 0:
+                share = top["value"] / positive_total * 100
+                insights.append(f"{top['category']} contributes {share:.1f}% of the displayed {metric} total in this chart.")
+            if top["category"] != bottom["category"] and top["value"] != bottom["value"]:
+                insights.append(f"The gap between {top['category']} and {bottom['category']} is {top['value'] - bottom['value']:,.0f} in {metric}.")
+        if len(insights) >= 6:
+            break
 
-        if aggregation == "count":
-            finding = (
-                f"{top['category']} has the most records "
-                f"among the displayed {category} groups: "
-                f"{dashboard_number(top['value'])}."
-            )
-        elif aggregation == "avg":
-            finding = (
-                f"{top['category']} has the highest average "
-                f"{metric} among the displayed {category} groups: "
-                f"{dashboard_number(top['value'])}."
-            )
-        else:
-            finding = (
-                f"{top['category']} has the highest total "
-                f"{metric} among the displayed {category} groups: "
-                f"{dashboard_number(top['value'])}."
-            )
+    missing_by_column = df.isna().sum()
+    missing_by_column = missing_by_column[missing_by_column > 0].sort_values(ascending=False)
+    if not missing_by_column.empty:
+        column = str(missing_by_column.index[0])
+        count = int(missing_by_column.iloc[0])
+        pct = count / max(1, len(df)) * 100
+        insights.append(f"{column} has {count:,} missing values ({pct:.1f}% of rows); review this field before relying on analyses that use it.")
 
-        insights.append(finding)
-
-    for column in numeric_columns[:2]:
+    for column in df.columns:
+        if not is_numeric_column(df[column]):
+            continue
         values = pd.to_numeric(df[column], errors="coerce").dropna()
+        if len(values) < 8:
+            continue
+        q1, q3 = values.quantile([0.25, 0.75])
+        iqr = q3 - q1
+        if iqr <= 0:
+            continue
+        outlier_count = int(((values < q1 - 1.5 * iqr) | (values > q3 + 1.5 * iqr)).sum())
+        if outlier_count:
+            insights.append(f"{column} contains {outlier_count:,} potential outlier values under the 1.5×IQR rule; inspect them before drawing conclusions.")
+            break
 
-        if not values.empty:
-            insights.append(
-                f"{column}: total {dashboard_number(values.sum())}; "
-                f"average {dashboard_number(values.mean())} across "
-                f"{len(values)} non-missing numeric records."
-            )
+    if not insights:
+        insights.append("The dataset loaded successfully, but there is not enough grouped numeric information to produce additional summary findings.")
+    unique_insights: list[str] = []
+    for insight in insights:
+        if insight not in unique_insights:
+            unique_insights.append(insight)
+        if len(unique_insights) >= 8:
+            break
+    return unique_insights
 
+
+@app.post("/api/datasets/{dataset_id}/dashboard")
+def generate_dashboard(dataset_id: str, request: DashboardRequest):
+    item = get_dataset(dataset_id)
+    df = item["df"]
+    kpis = choose_dashboard_kpis(df)
+
+    try:
+        plan = create_dashboard_plan(df, provider=request.provider, api_key=request.apiKey, model=request.model)
+        charts = build_dashboard_charts(df, plan)
+        planner = "AI"
+        if not charts:
+            charts = build_fallback_charts(df)
+            planner = "Rules-based fallback"
+    except Exception as exc:
+        print(f"Dashboard planner error: {type(exc).__name__}: {exc}")
+        charts = build_fallback_charts(df)
+        planner = "Rules-based fallback"
+
+    insights = build_dashboard_insights(df, charts)
     return {
         "datasetId": dataset_id,
         "filename": item["filename"],
@@ -2642,5 +2876,5 @@ def generate_dashboard(
         "missingValues": int(df.isna().sum().sum()),
         "kpis": kpis,
         "charts": charts,
-        "insights": insights[:8],
+        "insights": insights,
     }

@@ -57,6 +57,34 @@ async function readResponse(response) {
   return data;
 }
 
+function formatMetricValue(label, value) {
+  const numericValue = Number(value);
+
+  if (!Number.isFinite(numericValue)) {
+    return String(value ?? "—");
+  }
+
+  if (
+    /(revenue|sales|turnover|profit|income|amount|price|cost|spend|expense|salary)/i.test(label)
+  ) {
+    return new Intl.NumberFormat("en-IN", {
+      style: "currency",
+      currency: "INR",
+      maximumFractionDigits: 0,
+    }).format(numericValue);
+  }
+
+  if (/(conversion rate|attrition rate|bounce rate|percentage|percent|rate)/i.test(label)) {
+    return `${new Intl.NumberFormat("en-IN", {
+      maximumFractionDigits: 2,
+    }).format(numericValue)}%`;
+  }
+
+  return new Intl.NumberFormat("en-IN", {
+    maximumFractionDigits: 2,
+  }).format(numericValue);
+}
+
 export default function App() {
   const [apiStatus, setApiStatus] = useState("Checking...");
   const [message, setMessage] = useState("");
@@ -363,27 +391,55 @@ export default function App() {
               </button>
             </div>
 
+            {dashboardLoading && (
+              <div className="dashboard-loading" role="status" aria-live="polite">
+                <span className="dashboard-loading-spinner" />
+                <div>
+                  <strong>Building your dashboard</strong>
+                  <p>Analysing columns, selecting charts, and calculating metrics…</p>
+                </div>
+              </div>
+            )}
+
             {dashboard && (
               <>
+                <div className="dashboard-overview-bar">
+                  <div>
+                    <span className="dashboard-overline">GENERATED FROM YOUR DATA</span>
+                    <h3>{dashboard.filename || dataset.filename}</h3>
+                    <p>
+                      {Number(dashboard.rowCount ?? profile?.rowCount ?? 0).toLocaleString()} rows
+                      <span className="overview-separator">·</span>
+                      {Number(dashboard.columnCount ?? profile?.columnCount ?? 0).toLocaleString()} columns
+                      <span className="overview-separator">·</span>
+                      {Number(dashboard.charts?.length || 0)} visualisations
+                    </p>
+                  </div>
+                  <span className="dashboard-planner-badge">
+                    <span className="dashboard-planner-dot" />
+                    {dashboard.planner || "Dashboard ready"}
+                  </span>
+                </div>
+
                 <div className="dashboard-kpis">
                   {(dashboard.kpis || []).map((kpi, index) => (
                     <article
-                      className="stat-card"
+                      className={`stat-card dashboard-kpi-card kpi-${kpi.kind || "metric"}`}
                       key={`${kpi.label}-${index}`}
                     >
                       <span>{kpi.label}</span>
                       <strong>
                         {typeof kpi.value === "number"
-                          ? kpi.value.toLocaleString(undefined, {
-                              maximumFractionDigits: 2,
-                            })
+                          ? formatMetricValue(kpi.label, kpi.value)
                           : String(kpi.value ?? "—")}
                       </strong>
+                      {kpi.detail && <small>{kpi.detail}</small>}
                     </article>
                   ))}
                 </div>
 
-                <div className="dashboard-charts">
+                {(dashboard.charts || []).length > 0 ? (
+                <div className={`dashboard-charts dashboard-charts-count-${(dashboard.charts || []).length}`}>
                   {(dashboard.charts || []).map((chart, index) => {
                     const chartData = (chart.data || []).map((item) => ({
                       ...item,
@@ -439,7 +495,12 @@ export default function App() {
                                       />
                                     ))}
                                   </Pie>
-                                  <Tooltip />
+                                  <Tooltip
+                                    formatter={(value, name) => [
+                                      formatMetricValue(chart.metric || chart.title || name, value),
+                                      chart.metric || name,
+                                    ]}
+                                  />
                                   <Legend />
                                 </PieChart>
                               ) : chartType === "line" ? (
@@ -447,7 +508,12 @@ export default function App() {
                                   <CartesianGrid strokeDasharray="3 3" />
                                   <XAxis dataKey="category" />
                                   <YAxis />
-                                  <Tooltip />
+                                  <Tooltip
+                                    formatter={(value, name) => [
+                                      formatMetricValue(chart.metric || chart.title || name, value),
+                                      chart.metric || name,
+                                    ]}
+                                  />
                                   <Legend />
                                   <Line
                                     type="monotone"
@@ -463,7 +529,12 @@ export default function App() {
                                   <CartesianGrid strokeDasharray="3 3" />
                                   <XAxis dataKey="category" />
                                   <YAxis />
-                                  <Tooltip />
+                                  <Tooltip
+                                    formatter={(value, name) => [
+                                      formatMetricValue(chart.metric || chart.title || name, value),
+                                      chart.metric || name,
+                                    ]}
+                                  />
                                   <Legend />
                                   <Area type="monotone" dataKey="value" name={chart.metric || chart.title || "Value"} stroke="#5471e8" fill="#5471e8" fillOpacity={0.18} />
                                 </AreaChart>
@@ -471,7 +542,12 @@ export default function App() {
                                 <BarChart data={chartData} layout={chartType === "horizontal" ? "vertical" : "horizontal"}>
                                   <CartesianGrid strokeDasharray="3 3" />
                                   {chartType === "horizontal" ? <><XAxis type="number" /><YAxis type="category" dataKey="category" width={100} /></> : <><XAxis dataKey="category" /><YAxis /></>}
-                                  <Tooltip />
+                                  <Tooltip
+                                    formatter={(value, name) => [
+                                      formatMetricValue(chart.metric || chart.title || name, value),
+                                      chart.metric || name,
+                                    ]}
+                                  />
                                   <Legend />
                                   <Bar dataKey="value" name={chart.metric || chart.title || "Value"} fill="#5471e8" radius={[5, 5, 0, 0]} />
                                 </BarChart>
@@ -483,6 +559,13 @@ export default function App() {
                     );
                   })}
                 </div>
+                ) : (
+                  <div className="dashboard-empty-state">
+                    <BarChart3 size={28} />
+                    <h3>No suitable charts found</h3>
+                    <p>This dataset was loaded, but InsightAI could not find enough suitable fields to visualise. Try another dataset or review its column types.</p>
+                  </div>
+                )}
 
                 <article className="panel insights-card">
                   <h3>Key findings</h3>
@@ -497,11 +580,6 @@ export default function App() {
                   )}
                 </article>
 
-                {dashboard.planner && (
-                  <p className="planner-status">
-                    Dashboard planner: {dashboard.planner}
-                  </p>
-                )}
               </>
             )}
           </section>
@@ -588,7 +666,7 @@ export default function App() {
                 </div>
 
                 <h3>Data preview</h3>
-                <div className="table-scroll">
+                <div className="table-scroll data-preview-scroll">
                   <table>
                     <thead>
                       <tr>
